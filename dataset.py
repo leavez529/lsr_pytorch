@@ -4,7 +4,7 @@ import logging
 import os
 import pandas as pd
 import torch.nn.functional as F
-from util import handle_labels, classes_in_key, do_nlcd_means_tuning, to_float, load_nlcd_stats
+from util import handle_labels, classes_in_key, do_nlcd_means_tuning, to_float, load_nlcd_stats, color_aug
 import albumentations as albu
 
 def get_weak_augmentation():
@@ -31,10 +31,7 @@ class LandCoverDataset(Dataset):
         do_color_aug=False,
         do_superres=False,
         data_type="int8",
-        noise_threshold=1.9,
-        pre=False,
         aug=None,
-        cutout=False,
     ):
         self.data_dir = data_dir
         self.img_shape = img_shape
@@ -51,15 +48,7 @@ class LandCoverDataset(Dataset):
         self.hr_label_key = hr_label_key
         self.lr_label_key = lr_label_key
 
-        self.noise_threshold = noise_threshold
-        self.pre = pre
-
         self.aug = aug
-        if cutout:
-            self.cutout_util = Cutout(1, 25)
-        else:
-            self.cutout_util = None
-
         if self.hr_label_key:
             assert self.num_classes == classes_in_key(self.hr_label_key)
         if self.lr_label_key:
@@ -76,14 +65,13 @@ class LandCoverDataset(Dataset):
             for row in df.itertuples():
                 fn = getattr(row, "patch_fn")
                 index = getattr(row, "patch_id")
-                pre_fn = "%s_extended-%s_patches_pre/%s_patch_label_pre_%d.npy" % (state, split, state, index)
-                self.patches.append((os.path.join(self.data_dir, fn), state, index, os.path.join(self.data_dir, pre_fn)))
+                self.patches.append((os.path.join(self.data_dir, fn), state, index))
 
     def __len__(self):
         return len(self.patches)
 
     def __getitem__(self, index):
-        fn, state, idx, pre_fn = self.patches[index]
+        fn, state, idx = self.patches[index]
         if fn.endswith(".npz"):
             dl = np.load(fn)
             data = dl["arr_0"].squeeze()
@@ -97,13 +85,10 @@ class LandCoverDataset(Dataset):
         data_size = data.shape[0]
         input_size = self.img_shape[0]
 
-        # do a random crop if input_size is less than the prescribed size\
-        # not random
+        # do a random crop if input_size is less than the prescribed size
         if input_size < data_size:
             x_idx = np.random.randint(0, data_size - input_size)
             y_idx = np.random.randint(0, data_size - input_size)
-            x_idx = 0
-            y_idx = 0
             data = data[
                 y_idx : y_idx + input_size, x_idx : x_idx + input_size, :
             ]
@@ -119,34 +104,20 @@ class LandCoverDataset(Dataset):
         else:
             y_hr = data[:, :, self.hr_labels_index]
 
-        if self.pre:
-            y_pre = np.load(pre_fn)
-        else:
-            y_pre = y_hr
+        # do augmentation
         if self.aug:
-            # sample_weak = self.aug[0](image=img, masks=(y_hr, y_pre))
-            # img, (y_hr, y_pre) = sample_weak["image"], sample_weak["masks"]
-            img_strong = color_aug(img.copy())
-            if self.cutout_util:
-                img_strong, cutout_mask = self.cutout_util(img_strong)
-        else:
-            img_strong = img
+            sample_weak = self.aug[0](image=img, masks=y_hr)
+            img, y_hr = sample_weak["image"], sample_weak["masks"]
 
         # to torch
         img = torch.from_numpy(img).type(torch.FloatTensor)
         y_hr = torch.from_numpy(y_hr).type(torch.LongTensor)
-        y_pre = torch.from_numpy(y_pre).type(torch.LongTensor)
-        img_strong = torch.from_numpy(img_strong).type(torch.FloatTensor)
-
-        noise_mask = (y_pre != y_hr)
 
         # HWC to CHW
         img = img.permute((2, 0, 1))
-        img_strong = img_strong.permute((2, 0, 1))
 
-        # if do super resolution
+        # if do super resolution, get y_nlcd
         if self.do_superres:
-            # get y_nlcd
             if self.lr_label_key:
                 y_nlcd = handle_labels(
                     data[:, :, self.lr_labels_index], self.lr_label_key
@@ -155,27 +126,14 @@ class LandCoverDataset(Dataset):
                 y_nlcd = data[:, :, self.lr_labels_index]
             y_nlcd = torch.from_numpy(y_nlcd).type(torch.LongTensor)
 
-
         if self.do_superres:
             return {
                 "image": img,
-                "image_strong": img_strong,
                 "label_hr": y_hr,
                 "label_nlcd": y_nlcd,
-                "noise_mask": noise_mask,
-                "id": idx,
-                "state": state,
-                "label_pre": y_pre,
-                "cutout_mask": cutout_mask,
             }
         else:
             return {
                 "image": img,
-                "image_strong": img_strong,
                 "label_hr": y_hr,
-                "id": idx,
-                "state": state,
-                "noise_mask": noise_mask,
-                "label_pre": y_pre,
-                "cutout_mask": cutout_mask,
             }

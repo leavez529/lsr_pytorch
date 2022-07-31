@@ -296,16 +296,20 @@ class TestDataset(Dataset):
         }
 
 if __name__ == "__main__":
-    exp_name = "pre_co10T0.10_aug_semi_conf_cps2"
+    # input the experiment name, testing region and whether generate visual results
+    exp_name = "lsr"
+    visual = False
+    state = "ny_1m_2013"
+
+    # make sure data are put into following dir
     test = Test(
-        "../chesapeake_data",
-        "../chesapeake_data/ny_1m_2013_extended-test_tiles.csv",
+        "./chesapeake_data",
+        "./chesapeake_data/{}_extended-test_tiles.csv".format(state),
         "./exp_{}/test/".format(exp_name),
         "exp_{}/checkpoints/best_model.pth".format(exp_name),
         torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
         n_classes=4,
         input_size=256,
-        seg=True
     )
 
-    test.run_on_tiles(get_color=False)
+    test.run_on_tiles(get_color=visual)

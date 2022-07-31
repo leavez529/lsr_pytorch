@@ -113,7 +113,7 @@ def jaccard(input, target, reduce_batch_first=True, epsilon=1e-6, mask=None):
             j += jaccard(input[i, ...], target[i, ...], False, epsilon=epsilon, mask=new_mask)
         return j / input.shape[0]
 
-def evaluate(net, dataloader, device, do_superres=False, n_classes=4, dataset="chesapeake"):
+def evaluate(net, dataloader, device, n_classes=4):
     net.eval()
     # num_val_batches = len(dataloader)
     num_val_batches = 200
@@ -122,15 +122,10 @@ def evaluate(net, dataloader, device, do_superres=False, n_classes=4, dataset="c
     step = 0
     # iterate over the validation set
     for batch in tqdm(dataloader, total=num_val_batches, desc='Validation round', unit='batch', leave=False):
-        if dataset == "chesapeake":
-            image, mask_true = batch['image'], batch['label_hr']
-        elif dataset == "LoveDA":
-            image, mask_true = batch['image'], batch['mask']
-            image = image / 255.0
+        image, mask_true = batch['image'], batch['label_hr']
         # move images and labels to correct device and type
         image = image.to(device=device, dtype=torch.float)
         mask_true = mask_true.to(device=device, dtype=torch.long)
-        select_mask = mask_true > 0
         # ignore 0 class
         if n_classes >= 4:
             mask_true -= 1
@@ -138,10 +133,7 @@ def evaluate(net, dataloader, device, do_superres=False, n_classes=4, dataset="c
             # predict the mask
             mask_pred = net(image)
             pred = F.softmax(mask_pred, dim=1).argmax(dim=1)
-            if dataset == "chesapeake":
-                i, i_class = multiclass_jaccard(F.one_hot(pred, n_classes).permute((0, 3, 1, 2)).float(), F.one_hot(mask_true, n_classes).permute((0, 3, 1, 2)).float(), class_score=True)
-            elif dataset == "LoveDA":
-                i, i_class = multiclass_jaccard(F.one_hot(pred, n_classes).permute((0, 3, 1, 2)).float(), F.one_hot(mask_true + 1, n_classes + 1).permute((0, 3, 1, 2))[:,1:,:,:].float(), class_score=True, mask=select_mask.unsqueeze(dim=1))
+            i, i_class = multiclass_jaccard(F.one_hot(pred, n_classes).permute((0, 3, 1, 2)).float(), F.one_hot(mask_true, n_classes).permute((0, 3, 1, 2)).float(), class_score=True)
             iou_score += i.item()
             iou_class += i_class
         step += 1

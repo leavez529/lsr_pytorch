@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 import segmentation_models_pytorch as smp
 import numpy as np
-from loss import SRLoss
+from loss import SRLoss, SoftNaiveLoss
 from evaluate import multiclass_jaccard, evaluate, jaccard
 from dataset import LandCoverDataset
 from util import load_nlcd_stats
@@ -28,12 +28,12 @@ def train_net(net,
               do_superres: bool = False,
               amp: bool = False):
 
-    # config the path to the chesapeake dataset folder
-    data_dir = "/home/liangcw/{}_data/".format(args.dataset)
+    # config the path to the chesapeake dataset folder and states trained on
+    data_dir = "chesapeake_data/"
     state = ["ny_1m_2013"]
 
     # 1. Create dataset
-    train_set = LandCoverDataset(data_dir, (image_size, image_size, 4), state, "train", do_superres = do_superres, pre=args.pre)
+    train_set = LandCoverDataset(data_dir, (image_size, image_size, 4), state, "train", do_superres = do_superres)
     val_set = LandCoverDataset(data_dir, (image_size, image_size, 4), state, "val", do_superres = do_superres)
     n_train = len(train_set)
     n_val = len(val_set)
@@ -79,6 +79,9 @@ def train_net(net,
             nlcd_means = nlcd_means[:,1:]
             nlcd_vars = nlcd_vars[:,1:]
         criterion = SRLoss(nlcd_class_weights, nlcd_means, nlcd_vars)
+    # if use soft naive loss
+    elif naive:
+        criterion = SoftNaiveLoss(nlcd_means)
     # if not, just use cross entropy loss
     else:
         criterion = nn.CrossEntropyLoss(reduction="mean", ignore_index=-1)
@@ -123,16 +126,16 @@ def train_net(net,
 
                 with torch.cuda.amp.autocast(enabled=amp):
                     masks_pred = net(images)
-                    if do_superres:
-                        # compute super resolution loss
-                        loss = criterion(masks_pred, y_nlcd) * (1/40)
-                    else:
-                        # compute cross entropy loss
+                    if do_superres: # compute super resolution loss
+                        loss = criterion(masks_pred, y_nlcd)
+                    elif naive:
+                        loss = criterion(masks_pred, y_nlcd)
+                    else: # compute cross entropy loss
                         loss = criterion(masks_pred, labels)
 
                 with torch.no_grad():
                     pred = F.softmax(masks_pred, dim = 1).argmax(dim=1)
-                    # compute mIoU on training set
+                    # compute training mIoU
                     iou, iou_class = multiclass_jaccard(F.one_hot(pred, n_classes).permute((0, 3, 1, 2)).float(), F.one_hot(labels, n_classes).permute((0, 3, 1, 2)).float(), class_score=True)
                 
                 # gradient descent
@@ -163,7 +166,7 @@ def train_net(net,
                     break
 
         # Evaluation round
-        val_score, val_score_class = evaluate(net, val_loader, device, do_superres=do_superres, n_classes=n_classes, dataset=args.dataset)
+        val_score, val_score_class = evaluate(net, val_loader, device, n_classes=n_classes)
         experiment.log({
             'validation Score': val_score,
             'images': wandb.Image(images[0].cpu()),
@@ -182,6 +185,7 @@ def train_net(net,
         logging.info(f"********** Epoch {epoch + 1} **********")
         logging.info('Training average loss: {}, Training mIoU: {}, Training class IoU: {}'.format(epoch_loss / epoch_step, iou_score / epoch_step, iou_class_score / epoch_step))
         logging.info('Validation IoU: {}, Validation class IoU: {}'.format(val_score, val_score_class))
+        
         # save the best model according to mIoU on validation set
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
@@ -193,23 +197,23 @@ def train_net(net,
         logging.info(f"**********************************************")
 
 def get_args():
-    parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
+    parser = argparse.ArgumentParser(description='Train the UNet for land cover mapping')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=30, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=20, help='Batch size')
-    parser.add_argument('--size', dest='image_size', type=int, default=256)
-    parser.add_argument('--step', type=int, default=300)
+    parser.add_argument('--size', dest='image_size', type=int, default=256, help="Image size of input patches. If smaller than original size, random crop will be done.")
+    parser.add_argument('--step', type=int, default=300, help="Number of iterations for every epoch")
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=0.0001,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
-    parser.add_argument('--encoder', default="se_resnext50_32x4d", type = str)
-    parser.add_argument('--weights', default=None, type = str)
-    parser.add_argument("--lr-scheduler", dest="lr_scheduler", action='store_true', default=False)
-    parser.add_argument('--scheduler-step', dest='scheduler_step', type=int, default=5)
+    parser.add_argument('--encoder', default="se_resnext50_32x4d", type = str, help="Encoder type for neural network")
+    parser.add_argument('--weights', default=None, type = str, help="Pretrained weights for models")
+    parser.add_argument("--lr-scheduler", dest="lr_scheduler", action='store_true', default=False, help="Scheduler for learning rate")
+    parser.add_argument('--scheduler-step', dest='scheduler_step', type=int, default=5, help="Number of epochs before learning rate change")
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument('--name', type = str, help = 'name of experiment', required = True)
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
-    parser.add_argument('--superres', action='store_true', default=False)
-
+    parser.add_argument('--superres', action='store_true', default=False, help="Use super-resolution loss")
+    parser.add_argument('--naive', action='store_true', default=False, help="Use soft naive loss")
     parser.add_argument('--seed', type=int, default=0)
 
     return parser.parse_args()
@@ -234,7 +238,7 @@ if __name__ == '__main__':
     logging.info(f'Using device {device}')
 
     # Change here to adapt to your data
-    # n_channels=3 for RGB images
+    # n_channels = 3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
     n_channels = 4
     n_classes = 4
@@ -245,7 +249,6 @@ if __name__ == '__main__':
         encoder_name=args.encoder,
         encoder_weights=args.weights,
         decoder_use_batchnorm=True,
-        decoder_attention_type=scse,
         in_channels=n_channels,
         classes=n_classes,
     )

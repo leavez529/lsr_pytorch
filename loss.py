@@ -59,20 +59,38 @@ class SRLoss(nn.Module):
         else:
             return torch.sum(loss, dim=1)
 
-class SoftNaiveLoss(nn.Module):
+class CrossEntropy(nn.Module):
     def __init__(self, reduction = True):
+        super(CrossEntropy, self).__init__()
+        self.reduction = reduction
+
+    # y_output and y_true should be one hot
+    def forward(self, y_output, y_true, from_logits = True, smooth = 0.000001):
+        if from_logits:
+            softmax = nn.Softmax(dim=1)
+            y_pred = softmax(y_output)
+        else:
+            y_pred = y_output
+
+        y_pred = torch.clamp(y_pred, smooth, 1)
+        log_pred = torch.log(y_pred)
+        nll = -1 * y_true * log_pred
+        loss = torch.sum(nll, dim=1)
+
+        if self.reduction:
+            return loss.mean()
+        else:
+            return loss
+
+class SoftNaiveLoss(nn.Module):
+    def __init__(self, ncld_means, reduction = True):
         super(SoftNaiveLoss, self).__init__()
+        self.ncld_means = ncld_means
         self.reduction = reduction
 
     # y_true is class
-    def forward(self, y_pred, y_true, y_nlcd, from_logits = True, smooth = 0.000001):
-        if self.reduction == True:
-            reduce = "mean"
-        else:
-            reduce = "none"
-        hr_loss = nn.CrossEntropyLoss(reduction=reduce)
+    def forward(self, y_pred, y_nlcd, from_logits = True, smooth = 0.000001):
         sr_loss = CrossEntropy(self.reduction)
-        if self.reduction:
-            return self.hr_weight * hr_loss(y_pred, y_true) + self.sr_weight * sr_loss(y_pred, y_nlcd, from_logits)
-        else:
-            return self.hr_weight * torch.sum(hr_loss(y_pred, y_true), dim=(1,2)) + self.sr_weight * sr_loss(y_pred, y_nlcd, from_logits)
+        # get hr class distribution illustrated by the nlcd class
+        y_dist = torch.matmul(y_nlcd.permute((0, 2, 3, 1)), nlcd_means)
+        return sr_loss(y_pred, y_dist, from_logits)
